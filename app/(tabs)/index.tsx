@@ -1,6 +1,8 @@
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, ActivityIndicator, Alert, Animated, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { useBattleSfx } from "@/hooks/use-battle-sfx";
 import { haptic } from "@/lib/haptics";
 import {
   UNIT_DEFINITIONS,
@@ -92,6 +94,7 @@ function NavBar({ active, change }: { active: GameView; change: (view: GameView)
 
 export default function HomeScreen() {
   const { state, update, reset, ready } = useWarGame();
+  const { soundEnabled, toggleSound, playRound: playBattleSfx, playOutcome } = useBattleSfx();
   const territoryCount = controlledTerritories(state.territories).length;
   const power = calculateArmyPower(state.army);
 
@@ -114,6 +117,7 @@ export default function HomeScreen() {
   };
   const playRound = (tactic: Tactic) => {
     haptic.medium();
+    playBattleSfx();
     update((current) => resolveBattleRound(current, tactic));
   };
   const finishBattle = () => {
@@ -123,6 +127,7 @@ export default function HomeScreen() {
     } else {
       haptic.error();
     }
+    playOutcome(won);
     update(concludeBattle);
   };
   const startFresh = () => {
@@ -170,7 +175,7 @@ export default function HomeScreen() {
             <ArmyView army={state.army} gold={state.resources.gold} fuel={state.resources.fuel} power={power} onRecruit={recruit} />
           ) : null}
           {state.view === "battle" && state.battle ? (
-            <BattleView battle={state.battle} territory={selected} onPlay={playRound} onFinish={finishBattle} />
+            <BattleView battle={state.battle} territory={selected} soundEnabled={soundEnabled} onToggleSound={toggleSound} onPlay={playRound} onFinish={finishBattle} />
           ) : null}
           {state.view === "report" ? (
             <ReportView report={state.lastReport} onMap={() => changeView("map")} onCommand={() => changeView("command")} />
@@ -276,23 +281,82 @@ function ArmyView({ army, gold, fuel, power, onRecruit }: { army: { infantry: nu
   );
 }
 
-function BattleView({ battle, territory, onPlay, onFinish }: { battle: { playerHealth: number; enemyHealth: number; round: number; log: string[]; status: "active" | "victory" | "defeat" }; territory: Territory | null; onPlay: (tactic: Tactic) => void; onFinish: () => void }) {
+function BattleView({ battle, territory, soundEnabled, onToggleSound, onPlay, onFinish }: { battle: { playerHealth: number; enemyHealth: number; round: number; log: string[]; status: "active" | "victory" | "defeat" }; territory: Territory | null; soundEnabled: boolean; onToggleSound: () => void; onPlay: (tactic: Tactic) => void; onFinish: () => void }) {
   const active = battle.status === "active";
+  const [reduceMotion, setReduceMotion] = useState(false);
+  const lastRound = useRef(battle.round);
+  const strike = useRef(new Animated.Value(0)).current;
+  const flash = useRef(new Animated.Value(0)).current;
+  const burst = useRef(new Animated.Value(0)).current;
+  const outcomePulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion).catch(() => undefined);
+    const subscription = AccessibilityInfo.addEventListener("reduceMotionChanged", setReduceMotion);
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    const isNewRound = battle.round > lastRound.current;
+    lastRound.current = battle.round;
+    if (reduceMotion) {
+      strike.setValue(0);
+      flash.setValue(0);
+      burst.setValue(0);
+      outcomePulse.setValue(0);
+      return;
+    }
+    if (isNewRound) {
+      Animated.parallel([
+        Animated.sequence([
+          Animated.timing(strike, { toValue: 1, duration: 220, useNativeDriver: true }),
+          Animated.timing(strike, { toValue: 0, duration: 210, useNativeDriver: true }),
+        ]),
+        Animated.sequence([
+          Animated.timing(flash, { toValue: 0.72, duration: 90, useNativeDriver: true }),
+          Animated.timing(flash, { toValue: 0, duration: 260, useNativeDriver: true }),
+        ]),
+        Animated.sequence([
+          Animated.timing(burst, { toValue: 1, duration: 120, useNativeDriver: true }),
+          Animated.timing(burst, { toValue: 0, duration: 430, useNativeDriver: true }),
+        ]),
+      ]).start();
+    }
+    if (!active) {
+      Animated.sequence([
+        Animated.timing(outcomePulse, { toValue: 1, duration: 240, useNativeDriver: true }),
+        Animated.timing(outcomePulse, { toValue: 0, duration: 650, useNativeDriver: true }),
+      ]).start();
+    }
+  }, [active, battle.round, burst, flash, outcomePulse, reduceMotion, strike]);
+
   const tactics: { id: Tactic; title: string; copy: string }[] = [
     { id: "assault", title: "هجوم مركز", copy: "ضربة متوازنة" },
     { id: "armor", title: "اندفاع مدرع", copy: "ضرر أعلى ومخاطرة" },
     { id: "fortify", title: "تحصين وتمهيد", copy: "خفض ضرر الخصم" },
   ];
+  const shotTranslate = strike.interpolate({ inputRange: [0, 1], outputRange: [-120, 108] });
+  const shake = strike.interpolate({ inputRange: [0, 0.32, 0.58, 1], outputRange: [0, -8, 7, 0] });
+  const burstLift = burst.interpolate({ inputRange: [0, 1], outputRange: [10, -28] });
+  const outcomeScale = outcomePulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.035] });
   return (
     <View style={styles.screenGap}>
-      <SectionTitle eyebrow="اشتباك مباشر" title={territory ? `معركة ${territory.name}` : "ساحة المعركة"} action={`جولة ${battle.round}`} />
-      <View style={styles.battleArena}>
+      <View style={styles.battleHeadingRow}>
+        <SectionTitle eyebrow="اشتباك مباشر" title={territory ? `معركة ${territory.name}` : "ساحة المعركة"} action={`جولة ${battle.round}`} />
+        <Pressable accessibilityRole="button" accessibilityLabel={soundEnabled ? "كتم مؤثرات المعركة" : "تشغيل مؤثرات المعركة"} onPress={onToggleSound} style={({ pressed }) => [styles.soundToggle, pressed && styles.pressed]}>
+          <Text style={styles.soundToggleText}>{soundEnabled ? "◖ صوت" : "◌ صامت"}</Text>
+        </Pressable>
+      </View>
+      <Animated.View style={[styles.battleArena, { transform: [{ translateX: shake }] }]}>
+        <Animated.View pointerEvents="none" style={[styles.battleFlash, { opacity: flash }]} />
+        <Animated.View pointerEvents="none" style={[styles.projectile, { opacity: flash, transform: [{ translateX: shotTranslate }, { rotate: "-18deg" }] }]}><Text style={styles.projectileText}>✦</Text></Animated.View>
+        <Animated.View pointerEvents="none" style={[styles.damageBurst, { opacity: burst, transform: [{ translateY: burstLift }, { scale: burst }] }]}><Text style={styles.damageBurstText}>ضرر</Text></Animated.View>
         <View style={styles.forceHeader}><Text style={styles.forceLabel}>قواتك</Text><Text style={styles.forceHealth}>{battle.playerHealth}</Text></View>
         <View style={styles.healthTrack}><View style={[styles.healthFill, styles.playerHealth, { width: `${Math.min(100, battle.playerHealth)}%` }]} /></View>
         <View style={styles.battleDivider}><Text style={styles.vsText}>VS</Text></View>
         <View style={styles.forceHeader}><Text style={styles.forceLabel}>دفاع العدو</Text><Text style={styles.forceHealth}>{battle.enemyHealth}</Text></View>
         <View style={styles.healthTrack}><View style={[styles.healthFill, styles.enemyHealth, { width: `${Math.min(100, battle.enemyHealth)}%` }]} /></View>
-      </View>
+      </Animated.View>
 
       {active ? (
         <View style={styles.tacticsGroup}>
@@ -300,7 +364,7 @@ function BattleView({ battle, territory, onPlay, onFinish }: { battle: { playerH
           {tactics.map((tactic) => <Pressable key={tactic.id} onPress={() => onPlay(tactic.id)} style={({ pressed }) => [styles.tacticCard, pressed && styles.pressed]}><View><Text style={styles.tacticTitle}>{tactic.title}</Text><Text style={styles.tacticCopy}>{tactic.copy}</Text></View><Text style={styles.tacticChevron}>‹</Text></Pressable>)}
         </View>
       ) : (
-        <View style={[styles.outcomeCard, battle.status === "victory" ? styles.outcomeVictory : styles.outcomeDefeat]}><Text style={styles.outcomeTitle}>{battle.status === "victory" ? "تم كسر الدفاع" : "انتهت العملية"}</Text><Text style={styles.outcomeCopy}>{battle.status === "victory" ? "ثبّت السيطرة واستلم مكافآت المنطقة." : "تحتاج قواتك إلى إعادة تنظيم قبل المحاولة المقبلة."}</Text><TapButton label="فتح التقرير" onPress={onFinish} tone={battle.status === "victory" ? "gold" : "danger"} /></View>
+        <Animated.View style={[styles.outcomeCard, battle.status === "victory" ? styles.outcomeVictory : styles.outcomeDefeat, { transform: [{ scale: outcomeScale }] }]}><Text style={styles.outcomeMark}>{battle.status === "victory" ? "✦" : "!"}</Text><Text style={styles.outcomeTitle}>{battle.status === "victory" ? "تم كسر الدفاع" : "انتهت العملية"}</Text><Text style={styles.outcomeCopy}>{battle.status === "victory" ? "ثبّت السيطرة واستلم مكافآت المنطقة." : "تحتاج قواتك إلى إعادة تنظيم قبل المحاولة المقبلة."}</Text><TapButton label="فتح التقرير" onPress={onFinish} tone={battle.status === "victory" ? "gold" : "danger"} /></Animated.View>
       )}
 
       <View style={styles.logCard}><Text style={styles.logTitle}>سجل الميدان</Text>{battle.log.slice(-3).reverse().map((entry, index) => <Text key={`${entry}-${index}`} style={styles.logEntry}>• {entry}</Text>)}</View>
@@ -403,6 +467,14 @@ const styles = StyleSheet.create({
   costText: { color: "#D7C89B", fontSize: 10, fontWeight: "800" },
   powerText: { color: "#A7C897", fontSize: 10, fontWeight: "800" },
   battleArena: { padding: 18, borderRadius: 22, backgroundColor: "#172F49", borderWidth: 1, borderColor: "#406079", gap: 9 },
+  battleHeadingRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between" },
+  soundToggle: { borderRadius: 99, borderWidth: 1, borderColor: "#42637A", backgroundColor: "#132A43", paddingHorizontal: 10, paddingVertical: 7, marginBottom: 2 },
+  soundToggleText: { color: "#DDE5E9", fontSize: 10, fontWeight: "800" },
+  battleFlash: { ...StyleSheet.absoluteFillObject, backgroundColor: "#E7B34B", borderRadius: 22 },
+  projectile: { position: "absolute", top: "46%", right: 112, zIndex: 4 },
+  projectileText: { color: "#F7D479", fontSize: 30, fontWeight: "900", textShadowColor: "#E87E43", textShadowRadius: 14 },
+  damageBurst: { position: "absolute", top: "42%", right: 34, zIndex: 5, backgroundColor: "#B8474D", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4 },
+  damageBurstText: { color: "#FFFFFF", fontSize: 11, fontWeight: "900" },
   forceHeader: { flexDirection: "row", justifyContent: "space-between" },
   forceLabel: { color: "#DCE6EA", fontSize: 13, fontWeight: "800" },
   forceHealth: { color: "#F7F2E4", fontSize: 15, fontWeight: "900" },
@@ -422,6 +494,7 @@ const styles = StyleSheet.create({
   outcomeVictory: { backgroundColor: "#315842", borderWidth: 1, borderColor: "#83A66C" },
   outcomeDefeat: { backgroundColor: "#5A3540", borderWidth: 1, borderColor: "#D66565" },
   outcomeTitle: { color: "#F7F2E4", fontSize: 22, fontWeight: "900" },
+  outcomeMark: { color: "#F7F2E4", fontSize: 29, fontWeight: "900", lineHeight: 33 },
   outcomeCopy: { color: "#E8ECE7", fontSize: 13, lineHeight: 20, textAlign: "center", marginBottom: 5 },
   logCard: { backgroundColor: "#10273C", padding: 15, borderRadius: 16, borderWidth: 1, borderColor: "#2D4C67", gap: 7 },
   logTitle: { color: "#E7B34B", fontSize: 12, fontWeight: "800", textAlign: "right" },
