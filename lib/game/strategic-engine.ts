@@ -43,6 +43,8 @@ export type StrategicState = {
   combats: StrategicCombat[];
   elapsed: number;
   aiStrategy: Strategy;
+  aiIntervalSeconds?: number;
+  levelId?: string;
 };
 
 export const STRATEGIC_INITIAL_STATE: StrategicState = {
@@ -201,8 +203,9 @@ export function tickStrategicGame(state: StrategicState, deltaSeconds: number): 
   let next = tickProduction(state, deltaSeconds);
   next = tickMovement(next, deltaSeconds);
   next = tickCombats(next, deltaSeconds);
-  const previousAiWindow = Math.floor(state.elapsed / 4);
-  const currentAiWindow = Math.floor(next.elapsed / 4);
+  const aiInterval = state.aiIntervalSeconds ?? 4;
+  const previousAiWindow = Math.floor(state.elapsed / aiInterval);
+  const currentAiWindow = Math.floor(next.elapsed / aiInterval);
   if (currentAiWindow > previousAiWindow) {
     const move = aiChooseMove(next);
     if (move) next = createAiTroopGroup(next, move.sourceId, move.targetId);

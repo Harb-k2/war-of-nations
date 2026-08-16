@@ -5,6 +5,7 @@ import Svg, { Polygon } from "react-native-svg";
 
 import { haptic } from "@/lib/haptics";
 import { createTroopGroup, type StrategicTerritory } from "@/lib/game/strategic-engine";
+import { getObjectiveText, isLevelUnlocked, LEVELS } from "@/lib/game/levels";
 import { useStrategicGame } from "@/hooks/use-strategic-game";
 
 const COLORS = {
@@ -45,12 +46,13 @@ function MapLine({ from, to, width, height, active = false }: { from: StrategicT
 }
 
 export function StrategicMapView() {
-  const { state, update, ready, reset } = useStrategicGame();
+  const { state, progress, outcome, level, update, ready, reset, selectLevel, retryLevel, nextLevel } = useStrategicGame();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dragSource, setDragSource] = useState<string | null>(null);
   const [dragPoint, setDragPoint] = useState<{ x: number; y: number } | null>(null);
   const [notice, setNotice] = useState("ابدأ باختيار منطقة خضراء، ثم اختر منطقة متصلة لإرسال نصف قواتك.");
   const [showGuide, setShowGuide] = useState(true);
+  const [showLevels, setShowLevels] = useState(false);
   const mapSize = useRef({ width: 1, height: 1 });
 
   useEffect(() => {
@@ -83,6 +85,7 @@ export function StrategicMapView() {
   }, [selectedSource, state.territories]);
 
   const sendTroops = useCallback((sourceId: string, targetId: string) => {
+    if (outcome !== "playing") return;
     const source = state.territories.find((territory) => territory.id === sourceId);
     const target = state.territories.find((territory) => territory.id === targetId);
     if (!source || !target || source.owner !== "player" || !source.neighbours.includes(targetId)) {
@@ -94,7 +97,7 @@ export function StrategicMapView() {
     update((current) => createTroopGroup(current, sourceId, targetId, 0.5));
     setNotice(`تم إرسال نصف قوات ${source.name} نحو ${target.name}. تابع الدائرة الذهبية أثناء الحركة.`);
     setSelectedId(null);
-  }, [state.territories, update]);
+  }, [outcome, state.territories, update]);
 
   const finishDrag = useCallback((x: number, y: number) => {
     if (!dragSource) return;
@@ -147,21 +150,34 @@ export function StrategicMapView() {
     onPanResponderTerminate: () => { setDragSource(null); setDragPoint(null); },
   }), [dragSource, finishDrag, state.territories]);
 
-  if (!ready) return <View style={styles.loading}><Text style={styles.loadingText}>يتم تجهيز الخريطة الحية...</Text></View>;
+  if (!ready) return <View style={styles.loading}><Text style={styles.loadingText}>يتم تجهيز الحملة...</Text></View>;
   const activeCombats = state.combats.length;
   const movingGroups = state.groups.length;
+  const objectiveText = getObjectiveText(level, state);
+  const bestStars = progress.bestStars[level.id] ?? 0;
+
+  const openLevel = (levelId: string) => {
+    const target = LEVELS.find((candidate) => candidate.id === levelId);
+    if (!target || !isLevelUnlocked(target, progress)) return;
+    haptic.medium();
+    selectLevel(levelId);
+    setSelectedId(null);
+    setShowLevels(false);
+    setNotice(`بدأ المستوى ${target.number}: ${target.briefing}`);
+  };
 
   return (
     <View style={styles.container}>
       <View style={styles.headerRow}>
         <View><Text style={styles.eyebrow}>المسرح الاستراتيجي</Text><Text style={styles.title}>خريطة التوسع الحي</Text></View>
-        <View style={styles.liveBadge}><View style={styles.liveDot} /><Text style={styles.liveText}>زمن حي</Text></View>
+        <Pressable accessibilityRole="button" onPress={() => setShowLevels((visible) => !visible)} style={({ pressed }) => [styles.levelButton, pressed && styles.pressed]}><Text style={styles.levelButtonText}>مستوى {level.number} · {level.difficulty}</Text></Pressable>
       </View>
+      {showLevels ? <View style={styles.levelPanel}><View style={styles.levelPanelHeader}><View><Text style={styles.levelPanelTitle}>مسار الحملة</Text><Text style={styles.levelPanelCopy}>افتح المستوى التالي بالفوز في المهمة الحالية.</Text></View><Text style={styles.levelProgressText}>{progress.unlockedThrough}/{LEVELS.length}</Text></View>{LEVELS.map((candidate) => { const unlocked = isLevelUnlocked(candidate, progress); const stars = progress.bestStars[candidate.id] ?? 0; const active = candidate.id === level.id; return <Pressable key={candidate.id} disabled={!unlocked} onPress={() => openLevel(candidate.id)} style={({ pressed }) => [styles.levelCard, active && styles.levelCardActive, !unlocked && styles.levelCardLocked, pressed && unlocked && styles.pressed]}><View style={styles.levelNumber}><Text style={styles.levelNumberText}>{unlocked ? candidate.number : "🔒"}</Text></View><View style={styles.levelCardBody}><Text style={styles.levelCardTitle}>{candidate.title}</Text><Text style={styles.levelCardCopy}>{candidate.difficulty} · {candidate.reward} مكافأة</Text></View><Text style={styles.levelStars}>{"★".repeat(stars)}{"☆".repeat(3 - stars)}</Text></Pressable>; })}</View> : null}
       {showGuide ? <View style={styles.guideCard}><View style={styles.guideHeader}><Text style={styles.guideTitle}>كيف تلعب؟</Text><Pressable onPress={dismissGuide}><Text style={styles.guideDismiss}>فهمت</Text></Pressable></View><Text style={styles.guideCopy}>1. اختر منطقة خضراء.  2. اتبع الخط الذهبي إلى منطقة متصلة.  3. اسحب إليها أو استخدم زر الإرسال. القوات والإنتاج يعملان تلقائياً.</Text></View> : null}
-      <View style={styles.missionCard}><Text style={styles.missionEyebrow}>مهمتك الآن</Text><Text style={styles.missionTitle}>{objectiveSource && objectiveTarget ? `أرسل قوات ${objectiveSource.name} إلى ${objectiveTarget.name}` : "حافظ على المناطق الخضراء وزد قواتك"}</Text><Pressable onPress={() => { if (objectiveSource) { setSelectedId(objectiveSource.id); setNotice(`اختر ${objectiveTarget?.name ?? "منطقة متصلة"} لإرسال القوات.`); } }} style={({ pressed }) => [styles.missionButton, pressed && styles.pressed]}><Text style={styles.missionButtonText}>إظهار الخطوة التالية</Text></Pressable></View>
+      <View style={styles.missionCard}><Text style={styles.missionEyebrow}>المستوى {level.number} · {level.title}</Text><Text style={styles.missionTitle}>{objectiveText}</Text><Text style={styles.missionBrief}>{level.briefing}</Text><Pressable onPress={() => { if (objectiveSource) { setSelectedId(objectiveSource.id); setNotice(`اختر ${objectiveTarget?.name ?? "منطقة متصلة"} لإرسال القوات.`); } }} style={({ pressed }) => [styles.missionButton, pressed && styles.pressed]}><Text style={styles.missionButtonText}>إظهار الخطوة التالية</Text></Pressable></View>
       <Text style={styles.help}>{notice}</Text>
       <View style={styles.statRow}><Text style={styles.stat}>قوات متحركة {movingGroups}</Text><Text style={styles.stat}>معارك {activeCombats}</Text><Text style={styles.stat}>زمن {Math.floor(state.elapsed)}ث</Text></View>
-      <View style={styles.map} onLayout={(event) => { mapSize.current = event.nativeEvent.layout; }} {...panResponder.panHandlers}>
+      <View style={styles.map} onLayout={(event) => { mapSize.current = event.nativeEvent.layout; }} {...(outcome === "playing" ? panResponder.panHandlers : {})}>
         <RegionalBackdrop territories={state.territories} />
         <View pointerEvents="none" style={styles.mapTexture} />
         {lines}
@@ -182,6 +198,7 @@ export function StrategicMapView() {
         })}
       </View>
       <View style={styles.legend}><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.player.ring }]} /> قواتك</Text><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.enemy.ring }]} /> خصم</Text><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.neutral.ring }]} /> محايد</Text></View>
+      {outcome !== "playing" ? <View style={[styles.outcomePanel, outcome === "victory" ? styles.outcomeVictory : styles.outcomeDefeat]}><Text style={styles.outcomeSymbol}>{outcome === "victory" ? "✦" : "!"}</Text><Text style={styles.outcomeTitle}>{outcome === "victory" ? "اكتمل المستوى" : "انتهت المهمة"}</Text><Text style={styles.outcomeCopy}>{outcome === "victory" ? `حصلت على ${bestStars || 1} نجوم وفتحت تحدياً جديداً.` : "استعد ترتيب قواتك ثم حاول من جديد."}</Text><View style={styles.outcomeActions}>{outcome === "victory" && level.number < LEVELS.length ? <Pressable onPress={nextLevel} style={({ pressed }) => [styles.outcomePrimary, pressed && styles.pressed]}><Text style={styles.outcomePrimaryText}>المستوى التالي</Text></Pressable> : null}<Pressable onPress={retryLevel} style={({ pressed }) => [styles.outcomeSecondary, pressed && styles.pressed]}><Text style={styles.outcomeSecondaryText}>{outcome === "victory" ? "إعادة المستوى" : "حاول مجدداً"}</Text></Pressable></View></View> : null}
       {selected ? <View style={styles.detailCard}><View style={styles.detailText}><Text style={styles.detailTitle}>{selected.name}</Text><Text style={styles.detailCopy}>{COLORS[selected.owner].label} · {Math.floor(selected.troops)} / {selected.maxTroops} قوات</Text>{selectedSource ? <Text style={styles.detailAction}>اختر هدفاً متصلاً أدناه لإرسال 50% من القوات.</Text> : null}</View><View style={styles.detailSide}><Text style={styles.detailValue}>+{selected.productionRate.toFixed(1)} / ث</Text>{selectedSource && validTargetIds.length > 0 ? <View style={styles.quickTargets}>{validTargetIds.map((targetId) => { const target = state.territories.find((territory) => territory.id === targetId); return target ? <Pressable key={target.id} onPress={() => sendTroops(selectedSource.id, target.id)} style={({ pressed }) => [styles.quickTarget, pressed && styles.pressed]}><Text style={styles.quickTargetText}>إرسال إلى {target.name}</Text></Pressable> : null; })}</View> : null}</View></View> : null}
       <Pressable onPress={reset} style={({ pressed }) => [styles.reset, pressed && { opacity: 0.7 }]}><Text style={styles.resetText}>إعادة حملة الخريطة</Text></Pressable>
     </View>
@@ -193,6 +210,22 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between" },
   eyebrow: { color: "#83A66C", fontSize: 10, fontWeight: "800", letterSpacing: 1.1, lineHeight: 15 },
   title: { color: "#F7F2E4", fontSize: 22, fontWeight: "900", lineHeight: 29 },
+  levelButton: { borderRadius: 99, backgroundColor: "#193B54", borderWidth: 1, borderColor: "#4D7188", paddingHorizontal: 10, paddingVertical: 7, marginBottom: 2 },
+  levelButtonText: { color: "#E7B34B", fontSize: 10, fontWeight: "900" },
+  levelPanel: { backgroundColor: "#132A43", borderRadius: 18, borderWidth: 1, borderColor: "#42637A", padding: 12, gap: 8 },
+  levelPanelHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 3 },
+  levelPanelTitle: { color: "#F7F2E4", fontSize: 15, fontWeight: "900", textAlign: "right" },
+  levelPanelCopy: { color: "#B7C2CE", fontSize: 10, lineHeight: 15, textAlign: "right", marginTop: 2 },
+  levelProgressText: { color: "#E7B34B", fontSize: 12, fontWeight: "900" },
+  levelCard: { flexDirection: "row", gap: 9, alignItems: "center", borderRadius: 13, padding: 9, backgroundColor: "#1A3851", borderWidth: 1, borderColor: "#33516C" },
+  levelCardActive: { borderColor: "#E7B34B", backgroundColor: "#29465D" },
+  levelCardLocked: { opacity: 0.45 },
+  levelNumber: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#0B1F35" },
+  levelNumberText: { color: "#E7B34B", fontSize: 11, fontWeight: "900" },
+  levelCardBody: { flex: 1 },
+  levelCardTitle: { color: "#F7F2E4", fontSize: 13, fontWeight: "900", textAlign: "right" },
+  levelCardCopy: { color: "#B7C2CE", fontSize: 10, lineHeight: 15, textAlign: "right" },
+  levelStars: { color: "#E7B34B", fontSize: 13, letterSpacing: 1 },
   guideCard: { backgroundColor: "#193B54", borderRadius: 17, borderWidth: 1, borderColor: "#4D7188", padding: 14, gap: 7 },
   guideHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   guideTitle: { color: "#F7F2E4", fontSize: 14, fontWeight: "900" },
@@ -201,6 +234,7 @@ const styles = StyleSheet.create({
   missionCard: { backgroundColor: "#315842", borderRadius: 17, padding: 15, borderWidth: 1, borderColor: "#83A66C", gap: 5 },
   missionEyebrow: { color: "#D2E8C6", fontSize: 10, fontWeight: "900", letterSpacing: 1 },
   missionTitle: { color: "#F7F2E4", fontSize: 16, lineHeight: 22, fontWeight: "900", textAlign: "right" },
+  missionBrief: { color: "#DDE5E9", fontSize: 11, lineHeight: 17, textAlign: "right" },
   missionButton: { alignSelf: "flex-end", backgroundColor: "#E7B34B", borderRadius: 10, paddingHorizontal: 11, paddingVertical: 7, marginTop: 3 },
   missionButtonText: { color: "#0B1F35", fontSize: 11, fontWeight: "900" },
   liveBadge: { flexDirection: "row", alignItems: "center", gap: 5, borderRadius: 99, borderWidth: 1, borderColor: "#3D6A51", backgroundColor: "#173A32", paddingHorizontal: 9, paddingVertical: 6 },
@@ -228,6 +262,17 @@ const styles = StyleSheet.create({
   legend: { flexDirection: "row", justifyContent: "space-between", paddingHorizontal: 5 },
   legendItem: { color: "#B7C2CE", fontSize: 10, fontWeight: "700" },
   legendDot: { width: 8, height: 8, borderRadius: 4, marginRight: 3 },
+  outcomePanel: { borderRadius: 19, padding: 17, alignItems: "center", gap: 7, borderWidth: 1 },
+  outcomeVictory: { backgroundColor: "#315842", borderColor: "#83A66C" },
+  outcomeDefeat: { backgroundColor: "#5A3540", borderColor: "#D66565" },
+  outcomeSymbol: { color: "#F7F2E4", fontSize: 29, fontWeight: "900", lineHeight: 33 },
+  outcomeTitle: { color: "#F7F2E4", fontSize: 21, fontWeight: "900" },
+  outcomeCopy: { color: "#E8ECE7", fontSize: 12, lineHeight: 19, textAlign: "center" },
+  outcomeActions: { flexDirection: "row", gap: 8, marginTop: 4 },
+  outcomePrimary: { backgroundColor: "#E7B34B", borderRadius: 10, paddingHorizontal: 13, paddingVertical: 9 },
+  outcomePrimaryText: { color: "#0B1F35", fontSize: 11, fontWeight: "900" },
+  outcomeSecondary: { backgroundColor: "#193B54", borderRadius: 10, borderWidth: 1, borderColor: "#7890A0", paddingHorizontal: 13, paddingVertical: 9 },
+  outcomeSecondaryText: { color: "#F7F2E4", fontSize: 11, fontWeight: "900" },
   detailCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 15, borderRadius: 17, backgroundColor: "#172F49", borderWidth: 1, borderColor: "#41637A" },
   detailText: { flex: 1, paddingRight: 10 },
   detailSide: { alignItems: "flex-end", gap: 7, maxWidth: "53%" },
