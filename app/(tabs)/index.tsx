@@ -2,27 +2,20 @@ import { AccessibilityInfo, ActivityIndicator, Alert, Animated, Pressable, Scrol
 import { useEffect, useRef, useState } from "react";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { StrategicMapView } from "@/components/game/StrategicMapView";
 import { useBattleSfx } from "@/hooks/use-battle-sfx";
 import { haptic } from "@/lib/haptics";
 import {
   UNIT_DEFINITIONS,
   calculateArmyPower,
-  canAttack,
   collectTurnIncome,
   concludeBattle,
   controlledTerritories,
   recruitUnit,
   resolveBattleRound,
-  startBattle,
 } from "@/lib/game/engine";
 import type { GameView, Tactic, Territory, UnitType } from "@/lib/game/types";
 import { useWarGame } from "@/hooks/use-war-game";
-
-const ownerTone = {
-  player: { label: "تحت السيطرة", chip: "#83A66C", tile: "#315842" },
-  neutral: { label: "محايدة", chip: "#C7B98B", tile: "#56513F" },
-  enemy: { label: "معادية", chip: "#D66565", tile: "#663A42" },
-};
 
 function TapButton({ label, onPress, tone = "gold", disabled = false, compact = false }: { label: string; onPress: () => void; tone?: "gold" | "blue" | "danger" | "ghost"; disabled?: boolean; compact?: boolean }) {
   const toneStyle = tone === "gold" ? styles.goldButton : tone === "danger" ? styles.dangerButton : tone === "ghost" ? styles.ghostButton : styles.blueButton;
@@ -107,14 +100,6 @@ export default function HomeScreen() {
     haptic.medium();
     update((current) => recruitUnit(current, type));
   };
-  const openTerritory = (territory: Territory) => {
-    haptic.light();
-    update((current) => ({ ...current, selectedTerritoryId: territory.id }));
-  };
-  const attack = (territoryId: string) => {
-    haptic.medium();
-    update((current) => startBattle(current, territoryId));
-  };
   const playRound = (tactic: Tactic) => {
     haptic.medium();
     playBattleSfx();
@@ -168,9 +153,7 @@ export default function HomeScreen() {
           {state.view === "command" ? (
             <CommandView power={power} territoryCount={territoryCount} lastReport={state.lastReport} onMap={() => changeView("map")} onArmy={() => changeView("army")} onIncome={collectIncome} onReset={startFresh} />
           ) : null}
-          {state.view === "map" ? (
-            <MapView territories={state.territories} selected={selected} onSelect={openTerritory} onAttack={attack} />
-          ) : null}
+          {state.view === "map" ? <StrategicMapView /> : null}
           {state.view === "army" ? (
             <ArmyView army={state.army} gold={state.resources.gold} fuel={state.resources.fuel} power={power} onRecruit={recruit} />
           ) : null}
@@ -220,40 +203,6 @@ function CommandView({ power, territoryCount, lastReport, onMap, onArmy, onIncom
 
       {lastReport ? <View style={styles.noticeCard}><Text style={styles.noticeTitle}>آخر تقرير</Text><Text style={styles.noticeText}>{lastReport}</Text></View> : null}
       <Pressable onPress={onReset} style={({ pressed }) => [styles.resetLink, pressed && styles.pressed]}><Text style={styles.resetText}>بدء حملة جديدة</Text></Pressable>
-    </View>
-  );
-}
-
-function MapView({ territories, selected, onSelect, onAttack }: { territories: Territory[]; selected: Territory | null; onSelect: (territory: Territory) => void; onAttack: (id: string) => void }) {
-  const targetIsAttackable = selected ? canAttack(selected, territories) : false;
-  return (
-    <View style={styles.screenGap}>
-      <SectionTitle eyebrow="المسرح الاستراتيجي" title="خريطة العمليات" action="اضغط منطقة" />
-      <Text style={styles.mapIntro}>لا يمكن مهاجمة أي منطقة إلا إذا كانت ملاصقة لأرض تخضع لسيطرتك.</Text>
-      <View style={styles.mapBoard}>
-        {territories.map((territory) => {
-          const tone = ownerTone[territory.owner];
-          const selectedTile = selected?.id === territory.id;
-          return (
-            <Pressable key={territory.id} onPress={() => onSelect(territory)} style={({ pressed }) => [styles.territoryTile, { backgroundColor: tone.tile }, selectedTile && styles.territorySelected, pressed && styles.pressed]}>
-              <Text style={styles.territoryShort}>{territory.shortName}</Text>
-              <Text style={styles.territoryName}>{territory.name}</Text>
-              <View style={[styles.ownerPill, { backgroundColor: tone.chip }]}><Text style={styles.ownerText}>{territory.owner === "player" ? "دولة اللاعب" : territory.owner === "enemy" ? "قوة معادية" : "منطقة محايدة"}</Text></View>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      {selected ? (
-        <View style={styles.targetCard}>
-          <View style={styles.targetHeader}>
-            <View><Text style={styles.targetName}>{selected.name}</Text><Text style={styles.targetTerrain}>{selected.terrain}</Text></View>
-            <View style={[styles.statusDot, { backgroundColor: ownerTone[selected.owner].chip }]} />
-          </View>
-          <View style={styles.targetStats}><Text style={styles.targetStat}>دفاع {selected.defense}</Text><Text style={styles.targetStat}>+{selected.goldIncome} ذهب</Text><Text style={styles.targetStat}>+{selected.fuelIncome} وقود</Text></View>
-          {selected.owner === "player" ? <Text style={styles.ownedMessage}>هذه المنطقة مؤمّنة تحت رايتك.</Text> : <TapButton label={targetIsAttackable ? "تجهيز الهجوم" : "غير متصلة بأراضيك"} disabled={!targetIsAttackable} tone={targetIsAttackable ? "gold" : "ghost"} onPress={() => onAttack(selected.id)} />}
-        </View>
-      ) : null}
     </View>
   );
 }
