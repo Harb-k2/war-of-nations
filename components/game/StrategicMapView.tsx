@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Svg, { Polygon } from "react-native-svg";
 import { haptic } from "@/lib/haptics";
 import { CampaignCelebrationLayer, type CampaignCelebration } from "@/components/game/CampaignCelebrationLayer";
+import { FirstLevelTutorial } from "@/components/game/FirstLevelTutorial";
 import { createTroopGroup, type StrategicTerritory } from "@/lib/game/strategic-engine";
+import { FIRST_LEVEL_TUTORIAL_STORAGE_KEY, shouldShowFirstLevelTutorial, type FirstLevelTutorialStep } from "@/lib/game/first-level-tutorial";
 import { calculateLevelStars, getObjectiveText, isLevelUnlocked, LEVELS } from "@/lib/game/levels";
 import { useCampaignSfx } from "@/hooks/use-campaign-sfx";
 import { useStrategicGame } from "@/hooks/use-strategic-game";
@@ -47,7 +49,7 @@ function MapLine({ from, to, width, height, active = false }: { from: StrategicT
 }
 
 export function StrategicMapView() {
-  const { state, progress, outcome, level, update, ready, reset, selectLevel, retryLevel, nextLevel } = useStrategicGame();
+  const { state, progress, outcome, level, pause, resume, update, ready, reset, selectLevel, retryLevel, nextLevel } = useStrategicGame();
   const { playLevelUnlocked, playStarsEarned } = useCampaignSfx();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dragSource, setDragSource] = useState<string | null>(null);
@@ -57,6 +59,9 @@ export function StrategicMapView() {
   const [showLevels, setShowLevels] = useState(false);
   const [reduceMotion, setReduceMotion] = useState(false);
   const [celebration, setCelebration] = useState<CampaignCelebration | null>(null);
+  const [showFirstLevelTutorial, setShowFirstLevelTutorial] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState<FirstLevelTutorialStep>("intro");
+  const [tutorialSourceId, setTutorialSourceId] = useState<string | null>(null);
   const mapSize = useRef({ width: 1, height: 1 });
   const previousOutcome = useRef(outcome);
   const previousUnlockedThrough = useRef(progress.unlockedThrough);
@@ -70,6 +75,20 @@ export function StrategicMapView() {
       .then((value) => setShowGuide(value !== "seen"))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    let active = true;
+    AsyncStorage.getItem(FIRST_LEVEL_TUTORIAL_STORAGE_KEY).then((saved) => {
+      if (!active || !shouldShowFirstLevelTutorial(level.id, saved === "completed")) return;
+      setTutorialStep("intro");
+      setTutorialSourceId(null);
+      setShowGuide(false);
+      setShowFirstLevelTutorial(true);
+      pause();
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [level.id, pause, ready]);
 
   useEffect(() => {
     let active = true;
@@ -114,9 +133,29 @@ export function StrategicMapView() {
     AsyncStorage.setItem("war-of-nations.strategic-guide.v1", "seen").catch(() => undefined);
   }, []);
 
+  const finishFirstLevelTutorial = useCallback((skipped = false) => {
+    setShowFirstLevelTutorial(false);
+    setTutorialStep("intro");
+    setTutorialSourceId(null);
+    AsyncStorage.setItem(FIRST_LEVEL_TUTORIAL_STORAGE_KEY, "completed").catch(() => undefined);
+    resume();
+    setNotice(skipped ? "ابدأ بتوسيع مناطقك: اختر إقليماً أخضر ثم هدفاً متصلاً." : "بدأ المستوى. راقب حركة القوات الذهبية ثم وسّع سيطرتك.");
+  }, [resume]);
+
+  const replayFirstLevelTutorial = useCallback(() => {
+    setTutorialStep("intro");
+    setTutorialSourceId(null);
+    setSelectedId(null);
+    setShowGuide(false);
+    setShowFirstLevelTutorial(true);
+    pause();
+  }, [pause]);
+
   const selected = state.territories.find((territory) => territory.id === selectedId) ?? null;
   const selectedSource = selected?.owner === "player" ? selected : null;
   const validTargetIds = selectedSource?.neighbours ?? [];
+  const tutorialSource = state.territories.find((territory) => territory.id === tutorialSourceId) ?? null;
+  const tutorialTarget = tutorialSource?.neighbours.map((id) => state.territories.find((territory) => territory.id === id)).find((territory) => territory?.owner !== "player") ?? null;
   const objectiveSource = state.territories.find((territory) => territory.owner === "player" && territory.neighbours.some((id) => state.territories.find((candidate) => candidate.id === id)?.owner !== "player"));
   const objectiveTarget = objectiveSource?.neighbours.map((id) => state.territories.find((territory) => territory.id === id)).find((territory) => territory?.owner !== "player") ?? null;
 
@@ -134,6 +173,10 @@ export function StrategicMapView() {
 
   const sendTroops = useCallback((sourceId: string, targetId: string) => {
     if (outcome !== "playing") return;
+    if (showFirstLevelTutorial && tutorialStep === "intro") {
+      setNotice("اضغط «ابدأ التدريب» أولاً للتعرف إلى طريقة الحركة.");
+      return;
+    }
     const source = state.territories.find((territory) => territory.id === sourceId);
     const target = state.territories.find((territory) => territory.id === targetId);
     if (!source || !target || source.owner !== "player" || !source.neighbours.includes(targetId)) {
@@ -141,11 +184,22 @@ export function StrategicMapView() {
       setNotice("اختر منطقة خضراء ومنطقة متصلة بها فقط.");
       return;
     }
+    if (showFirstLevelTutorial && tutorialStep === "select-target" && (sourceId !== tutorialSourceId || target.owner === "player")) {
+      haptic.error();
+      setNotice("في التدريب، أرسل القوات إلى إقليم متصل غير أخضر ومضاء بالذهبي.");
+      return;
+    }
     haptic.medium();
     update((current) => createTroopGroup(current, sourceId, targetId, 0.5));
-    setNotice(`تم إرسال نصف قوات ${source.name} نحو ${target.name}. تابع الدائرة الذهبية أثناء الحركة.`);
+    if (showFirstLevelTutorial && tutorialStep === "select-target") {
+      setTutorialStep("complete");
+      haptic.success();
+      setNotice(`تم إصدار الأمر من ${source.name} إلى ${target.name}. اضغط «ابدأ المستوى» لتحريك الزمن.`);
+    } else {
+      setNotice(`تم إرسال نصف قوات ${source.name} نحو ${target.name}. تابع الدائرة الذهبية أثناء الحركة.`);
+    }
     setSelectedId(null);
-  }, [outcome, state.territories, update]);
+  }, [outcome, showFirstLevelTutorial, state.territories, tutorialSourceId, tutorialStep, update]);
 
   const finishDrag = useCallback((x: number, y: number) => {
     if (!dragSource) return;
@@ -219,14 +273,15 @@ export function StrategicMapView() {
     <View style={styles.container}>
       <View style={styles.headerRow}>
         <View><Text style={styles.eyebrow}>المسرح الاستراتيجي</Text><Text style={styles.title}>خريطة التوسع الحي</Text></View>
-        <Pressable accessibilityRole="button" onPress={() => setShowLevels((visible) => !visible)} style={({ pressed }) => [styles.levelButton, pressed && styles.pressed]}><Text style={styles.levelButtonText}>مستوى {level.number} · {level.difficulty}</Text></Pressable>
+        <View style={styles.headerActions}>{level.number === 1 ? <Pressable accessibilityRole="button" onPress={replayFirstLevelTutorial} style={({ pressed }) => [styles.tutorialButton, pressed && styles.pressed]}><Text style={styles.tutorialButtonText}>تدريب</Text></Pressable> : null}<Pressable accessibilityRole="button" disabled={showFirstLevelTutorial} onPress={() => setShowLevels((visible) => !visible)} style={({ pressed }) => [styles.levelButton, showFirstLevelTutorial && styles.disabledButton, pressed && styles.pressed]}><Text style={styles.levelButtonText}>مستوى {level.number} · {level.difficulty}</Text></Pressable></View>
       </View>
       {showLevels ? <View style={styles.levelPanel}><View style={styles.levelPanelHeader}><View><Text style={styles.levelPanelTitle}>مسار الحملة</Text><Text style={styles.levelPanelCopy}>افتح المستوى التالي بالفوز في المهمة الحالية.</Text></View><Text style={styles.levelProgressText}>{progress.unlockedThrough}/{LEVELS.length}</Text></View>{LEVELS.map((candidate) => { const unlocked = isLevelUnlocked(candidate, progress); const stars = progress.bestStars[candidate.id] ?? 0; const active = candidate.id === level.id; return <Pressable key={candidate.id} disabled={!unlocked} onPress={() => openLevel(candidate.id)} style={({ pressed }) => [styles.levelCard, active && styles.levelCardActive, !unlocked && styles.levelCardLocked, pressed && unlocked && styles.pressed]}><View style={styles.levelNumber}><Text style={styles.levelNumberText}>{unlocked ? candidate.number : "🔒"}</Text></View><View style={styles.levelCardBody}><Text style={styles.levelCardTitle}>{candidate.title}</Text><Text style={styles.levelCardCopy}>{candidate.difficulty} · {candidate.reward} مكافأة</Text></View><Text style={styles.levelStars}>{"★".repeat(stars)}{"☆".repeat(3 - stars)}</Text></Pressable>; })}</View> : null}
-      {showGuide ? <View style={styles.guideCard}><View style={styles.guideHeader}><Text style={styles.guideTitle}>كيف تلعب؟</Text><Pressable onPress={dismissGuide}><Text style={styles.guideDismiss}>فهمت</Text></Pressable></View><Text style={styles.guideCopy}>1. اختر منطقة خضراء.  2. اتبع الخط الذهبي إلى منطقة متصلة.  3. اسحب إليها أو استخدم زر الإرسال. القوات والإنتاج يعملان تلقائياً.</Text></View> : null}
+      {showGuide && !showFirstLevelTutorial ? <View style={styles.guideCard}><View style={styles.guideHeader}><Text style={styles.guideTitle}>كيف تلعب؟</Text><Pressable onPress={dismissGuide}><Text style={styles.guideDismiss}>فهمت</Text></Pressable></View><Text style={styles.guideCopy}>1. اختر منطقة خضراء.  2. اتبع الخط الذهبي إلى منطقة متصلة.  3. اسحب إليها أو استخدم زر الإرسال. القوات والإنتاج يعملان تلقائياً.</Text></View> : null}
       <View style={styles.missionCard}><Text style={styles.missionEyebrow}>المستوى {level.number} · {level.title}</Text><Text style={styles.missionTitle}>{objectiveText}</Text><Text style={styles.missionBrief}>{level.briefing}</Text><Pressable onPress={() => { if (objectiveSource) { setSelectedId(objectiveSource.id); setNotice(`اختر ${objectiveTarget?.name ?? "منطقة متصلة"} لإرسال القوات.`); } }} style={({ pressed }) => [styles.missionButton, pressed && styles.pressed]}><Text style={styles.missionButtonText}>إظهار الخطوة التالية</Text></Pressable></View>
       <Text style={styles.help}>{notice}</Text>
       <View style={styles.statRow}><Text style={styles.stat}>قوات متحركة {movingGroups}</Text><Text style={styles.stat}>معارك {activeCombats}</Text><Text style={styles.stat}>زمن {Math.floor(state.elapsed)}ث</Text></View>
-      <View style={styles.map} onLayout={(event) => { mapSize.current = event.nativeEvent.layout; }} {...(outcome === "playing" ? panResponder.panHandlers : {})}>
+      {showFirstLevelTutorial ? <FirstLevelTutorial step={tutorialStep} sourceName={tutorialSource?.name} targetName={tutorialTarget?.name} onBegin={() => setTutorialStep("select-source")} onRevealSource={() => { const source = objectiveSource ?? state.territories.find((territory) => territory.owner === "player"); if (source) { setSelectedId(source.id); setTutorialSourceId(source.id); setTutorialStep("select-target"); setNotice(`تم تحديد ${source.name}. اضغط إقليماً متصلاً مضاء بالذهبي.`); } }} onSkip={() => finishFirstLevelTutorial(true)} onComplete={() => finishFirstLevelTutorial(false)} /> : null}
+      <View style={styles.map} onLayout={(event) => { mapSize.current = event.nativeEvent.layout; }} {...(outcome === "playing" && !showFirstLevelTutorial ? panResponder.panHandlers : {})}>
         <RegionalBackdrop territories={state.territories} />
         <View pointerEvents="none" style={styles.mapTexture} />
         <CampaignCelebrationLayer celebration={celebration} reduceMotion={reduceMotion} />
@@ -244,7 +299,9 @@ export function StrategicMapView() {
           const tone = COLORS[territory.owner];
           const selectedTerritory = selectedId === territory.id;
           const isValidTarget = validTargetIds.includes(territory.id) && territory.id !== selectedSource?.id;
-          return <Pressable key={territory.id} accessibilityRole="button" accessibilityLabel={`${territory.name}، ${Math.floor(territory.troops)} قوات، ${COLORS[territory.owner].label}`} onPress={() => { if (isValidTarget && selectedSource) { sendTroops(selectedSource.id, territory.id); return; } setSelectedId(territory.id); setNotice(territory.owner === "player" ? `تم اختيار ${territory.name}. اضغط منطقة متصلة مضيئة أو اسحب إليها.` : "اختر منطقة خضراء أولاً، ثم ستضيء الأهداف المتصلة." ); }} style={[styles.territory, { left: `${territory.position.x}%`, top: `${territory.position.y}%`, backgroundColor: tone.fill, borderColor: selectedTerritory || isValidTarget ? "#E7B34B" : tone.ring }, selectedTerritory && styles.territorySelected, isValidTarget && styles.territoryValidTarget]}><View style={[styles.markerFlag, { borderColor: tone.ring }]}><Text style={[styles.markerText, { color: tone.ring }]}>{tone.marker}</Text></View><Text style={styles.territoryTroops}>{Math.floor(territory.troops)}</Text><Text style={styles.territoryName}>{territory.name}</Text><Text style={[styles.production, { color: tone.ring }]}>+{territory.productionRate.toFixed(1)}/ث</Text></Pressable>;
+          const isTutorialSource = showFirstLevelTutorial && tutorialStep === "select-source" && territory.owner === "player";
+          const isTutorialTarget = showFirstLevelTutorial && tutorialStep === "select-target" && selectedSource?.id === tutorialSourceId && isValidTarget && territory.owner !== "player";
+          return <Pressable key={territory.id} accessibilityRole="button" accessibilityLabel={`${territory.name}، ${Math.floor(territory.troops)} قوات، ${COLORS[territory.owner].label}`} onPress={() => { if (showFirstLevelTutorial && tutorialStep === "intro") { setNotice("اضغط «ابدأ التدريب» ثم اختر إقليماً أخضر."); return; } if (showFirstLevelTutorial && tutorialStep === "select-source") { if (territory.owner !== "player") { haptic.error(); setNotice("اختر إقليماً أخضر أولاً؛ فهو تحت قيادتك."); return; } setSelectedId(territory.id); setTutorialSourceId(territory.id); setTutorialStep("select-target"); haptic.success(); setNotice(`ممتاز. تم تحديد ${territory.name}؛ الآن اضغط هدفاً متصلاً مضاء بالذهبي.`); return; } if (isValidTarget && selectedSource) { sendTroops(selectedSource.id, territory.id); return; } setSelectedId(territory.id); setNotice(territory.owner === "player" ? `تم اختيار ${territory.name}. اضغط منطقة متصلة مضيئة أو اسحب إليها.` : "اختر منطقة خضراء أولاً، ثم ستضيء الأهداف المتصلة." ); }} style={[styles.territory, { left: `${territory.position.x}%`, top: `${territory.position.y}%`, backgroundColor: tone.fill, borderColor: selectedTerritory || isValidTarget || isTutorialSource || isTutorialTarget ? "#E7B34B" : tone.ring }, selectedTerritory && styles.territorySelected, isValidTarget && styles.territoryValidTarget, (isTutorialSource || isTutorialTarget) && styles.territoryTutorialFocus]}><View style={[styles.markerFlag, { borderColor: tone.ring }]}><Text style={[styles.markerText, { color: tone.ring }]}>{tone.marker}</Text></View><Text style={styles.territoryTroops}>{Math.floor(territory.troops)}</Text><Text style={styles.territoryName}>{territory.name}</Text><Text style={[styles.production, { color: tone.ring }]}>+{territory.productionRate.toFixed(1)}/ث</Text></Pressable>;
         })}
       </View>
       <View style={styles.legend}><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.player.ring }]} /> قواتك</Text><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.enemy.ring }]} /> خصم</Text><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.neutral.ring }]} /> محايد</Text></View>
@@ -258,10 +315,14 @@ export function StrategicMapView() {
 const styles = StyleSheet.create({
   container: { gap: 12 },
   headerRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between" },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 7 },
   eyebrow: { color: "#83A66C", fontSize: 10, fontWeight: "800", letterSpacing: 1.1, lineHeight: 15 },
   title: { color: "#F7F2E4", fontSize: 22, fontWeight: "900", lineHeight: 29 },
   levelButton: { borderRadius: 99, backgroundColor: "#193B54", borderWidth: 1, borderColor: "#4D7188", paddingHorizontal: 10, paddingVertical: 7, marginBottom: 2 },
   levelButtonText: { color: "#E7B34B", fontSize: 10, fontWeight: "900" },
+  tutorialButton: { borderRadius: 99, backgroundColor: "#315842", borderWidth: 1, borderColor: "#83A66C", paddingHorizontal: 10, paddingVertical: 7, marginBottom: 2 },
+  tutorialButtonText: { color: "#D2E8C6", fontSize: 10, fontWeight: "900" },
+  disabledButton: { opacity: 0.5 },
   levelPanel: { backgroundColor: "#132A43", borderRadius: 18, borderWidth: 1, borderColor: "#42637A", padding: 12, gap: 8 },
   levelPanelHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingBottom: 3 },
   levelPanelTitle: { color: "#F7F2E4", fontSize: 15, fontWeight: "900", textAlign: "right" },
@@ -302,6 +363,7 @@ const styles = StyleSheet.create({
   territory: { position: "absolute", width: 82, minHeight: 76, marginLeft: -41, marginTop: -38, borderRadius: 17, borderWidth: 2, paddingVertical: 6, paddingHorizontal: 5, alignItems: "center", justifyContent: "center", shadowColor: "#000", shadowOpacity: 0.3, shadowRadius: 7, elevation: 4, zIndex: 4 },
   territorySelected: { transform: [{ scale: 1.08 }], shadowColor: "#E7B34B", shadowOpacity: 0.55, shadowRadius: 10 },
   territoryValidTarget: { transform: [{ scale: 1.06 }], shadowColor: "#E7B34B", shadowOpacity: 0.8, shadowRadius: 11, elevation: 6 },
+  territoryTutorialFocus: { shadowColor: "#F0C45A", shadowOpacity: 0.95, shadowRadius: 13, elevation: 7 },
   markerFlag: { position: "absolute", top: -7, right: 5, minWidth: 18, height: 16, borderRadius: 4, borderWidth: 1, backgroundColor: "#10273C", alignItems: "center", justifyContent: "center" },
   markerText: { fontSize: 9, fontWeight: "900", lineHeight: 12 },
   territoryTroops: { color: "#F7F2E4", fontSize: 21, fontWeight: "900", lineHeight: 24 },

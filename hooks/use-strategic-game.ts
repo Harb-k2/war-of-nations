@@ -14,6 +14,7 @@ const initialCampaign = (): CampaignData => ({ state: createLevelState(getLevel(
 export function useStrategicGame() {
   const [campaign, setCampaign] = useState<CampaignData>(initialCampaign);
   const [ready, setReady] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const lastTick = useRef(Date.now());
 
   const persist = useCallback((next: CampaignData) => { AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next)).catch(() => undefined); }, []);
@@ -30,7 +31,7 @@ export function useStrategicGame() {
   }, [persist]);
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || isPaused) return;
     const interval = setInterval(() => {
       const now = Date.now();
       const delta = Math.min(1, Math.max(0, (now - lastTick.current) / 1000));
@@ -46,7 +47,7 @@ export function useStrategicGame() {
       });
     }, 250);
     return () => clearInterval(interval);
-  }, [persist, ready]);
+  }, [isPaused, persist, ready]);
 
   const update = useCallback((updater: (current: StrategicState) => StrategicState) => {
     setCampaign((current) => {
@@ -74,10 +75,11 @@ export function useStrategicGame() {
   const retryLevel = useCallback(() => selectLevel(campaign.progress.selectedLevelId), [campaign.progress.selectedLevelId, selectLevel]);
   const nextLevel = useCallback(() => { const currentLevel = getLevel(campaign.progress.selectedLevelId); selectLevel(`l${Math.min(6, currentLevel.number + 1)}`); }, [campaign.progress.selectedLevelId, selectLevel]);
   const sendTroops = useCallback((sourceId: string, targetId: string) => update((state) => createTroopGroup(state, sourceId, targetId, 0.5)), [update]);
+  const pause = useCallback(() => setIsPaused(true), []);
+  const resume = useCallback(() => { lastTick.current = Date.now(); setIsPaused(false); }, []);
   const reset = useCallback(() => {
     setCampaign((current) => { const next = { ...current, state: createLevelState(getLevel(current.progress.selectedLevelId)), outcome: "playing" as LevelOutcome }; persist(next); lastTick.current = Date.now(); return next; });
   }, [persist]);
 
-  return { state: campaign.state, progress: campaign.progress, outcome: campaign.outcome, level: getLevel(campaign.progress.selectedLevelId), ready, update, reset, selectLevel, retryLevel, nextLevel, sendTroops };
+  return { state: campaign.state, progress: campaign.progress, outcome: campaign.outcome, level: getLevel(campaign.progress.selectedLevelId), ready, isPaused, pause, resume, update, reset, selectLevel, retryLevel, nextLevel, sendTroops };
 }
-
