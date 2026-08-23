@@ -1,11 +1,12 @@
-import { PanResponder, Pressable, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, PanResponder, Pressable, StyleSheet, Text, View } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Svg, { Polygon } from "react-native-svg";
-
 import { haptic } from "@/lib/haptics";
+import { CampaignCelebrationLayer, type CampaignCelebration } from "@/components/game/CampaignCelebrationLayer";
 import { createTroopGroup, type StrategicTerritory } from "@/lib/game/strategic-engine";
-import { getObjectiveText, isLevelUnlocked, LEVELS } from "@/lib/game/levels";
+import { calculateLevelStars, getObjectiveText, isLevelUnlocked, LEVELS } from "@/lib/game/levels";
+import { useCampaignSfx } from "@/hooks/use-campaign-sfx";
 import { useStrategicGame } from "@/hooks/use-strategic-game";
 
 const COLORS = {
@@ -47,19 +48,66 @@ function MapLine({ from, to, width, height, active = false }: { from: StrategicT
 
 export function StrategicMapView() {
   const { state, progress, outcome, level, update, ready, reset, selectLevel, retryLevel, nextLevel } = useStrategicGame();
+  const { playLevelUnlocked, playStarsEarned } = useCampaignSfx();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dragSource, setDragSource] = useState<string | null>(null);
   const [dragPoint, setDragPoint] = useState<{ x: number; y: number } | null>(null);
   const [notice, setNotice] = useState("ابدأ باختيار منطقة خضراء، ثم اختر منطقة متصلة لإرسال نصف قواتك.");
   const [showGuide, setShowGuide] = useState(true);
   const [showLevels, setShowLevels] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(false);
+  const [celebration, setCelebration] = useState<CampaignCelebration | null>(null);
   const mapSize = useRef({ width: 1, height: 1 });
+  const previousOutcome = useRef(outcome);
+  const previousUnlockedThrough = useRef(progress.unlockedThrough);
+  const celebrationArmed = useRef(false);
+  const celebrationId = useRef(0);
+  const celebrationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unlockSoundTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     AsyncStorage.getItem("war-of-nations.strategic-guide.v1")
       .then((value) => setShowGuide(value !== "seen"))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => { if (active) setReduceMotion(enabled); }).catch(() => undefined);
+    const subscription = AccessibilityInfo.addEventListener("reduceMotionChanged", setReduceMotion);
+    return () => { active = false; subscription.remove(); };
+  }, []);
+
+  useEffect(() => () => {
+    if (celebrationTimer.current) clearTimeout(celebrationTimer.current);
+    if (unlockSoundTimer.current) clearTimeout(unlockSoundTimer.current);
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!celebrationArmed.current) {
+      celebrationArmed.current = true;
+      previousOutcome.current = outcome;
+      previousUnlockedThrough.current = progress.unlockedThrough;
+      return;
+    }
+
+    const unlockedLevel = progress.unlockedThrough > previousUnlockedThrough.current ? progress.unlockedThrough : null;
+    if (outcome === "victory" && previousOutcome.current === "playing") {
+      const stars = calculateLevelStars(level, state);
+      setCelebration({ id: ++celebrationId.current, stars, unlockedLevel });
+      haptic.success();
+      playStarsEarned();
+      if (unlockedLevel) {
+        if (unlockSoundTimer.current) clearTimeout(unlockSoundTimer.current);
+        unlockSoundTimer.current = setTimeout(playLevelUnlocked, 420);
+      }
+      if (celebrationTimer.current) clearTimeout(celebrationTimer.current);
+      celebrationTimer.current = setTimeout(() => setCelebration(null), unlockedLevel ? 2600 : 2000);
+    }
+    previousOutcome.current = outcome;
+    previousUnlockedThrough.current = progress.unlockedThrough;
+  }, [level, outcome, playLevelUnlocked, playStarsEarned, progress.unlockedThrough, ready, state]);
 
   const dismissGuide = useCallback(() => {
     setShowGuide(false);
@@ -155,6 +203,7 @@ export function StrategicMapView() {
   const movingGroups = state.groups.length;
   const objectiveText = getObjectiveText(level, state);
   const bestStars = progress.bestStars[level.id] ?? 0;
+  const earnedStars = outcome === "victory" ? calculateLevelStars(level, state) : 0;
 
   const openLevel = (levelId: string) => {
     const target = LEVELS.find((candidate) => candidate.id === levelId);
@@ -180,6 +229,7 @@ export function StrategicMapView() {
       <View style={styles.map} onLayout={(event) => { mapSize.current = event.nativeEvent.layout; }} {...(outcome === "playing" ? panResponder.panHandlers : {})}>
         <RegionalBackdrop territories={state.territories} />
         <View pointerEvents="none" style={styles.mapTexture} />
+        <CampaignCelebrationLayer celebration={celebration} reduceMotion={reduceMotion} />
         {lines}
         {dragPoint && dragSource ? <View pointerEvents="none" style={[styles.dragLine, { left: dragPoint.x - 1, top: dragPoint.y - 1 }]} /> : null}
         {state.groups.map((group) => {
@@ -198,7 +248,7 @@ export function StrategicMapView() {
         })}
       </View>
       <View style={styles.legend}><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.player.ring }]} /> قواتك</Text><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.enemy.ring }]} /> خصم</Text><Text style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: COLORS.neutral.ring }]} /> محايد</Text></View>
-      {outcome !== "playing" ? <View style={[styles.outcomePanel, outcome === "victory" ? styles.outcomeVictory : styles.outcomeDefeat]}><Text style={styles.outcomeSymbol}>{outcome === "victory" ? "✦" : "!"}</Text><Text style={styles.outcomeTitle}>{outcome === "victory" ? "اكتمل المستوى" : "انتهت المهمة"}</Text><Text style={styles.outcomeCopy}>{outcome === "victory" ? `حصلت على ${bestStars || 1} نجوم وفتحت تحدياً جديداً.` : "استعد ترتيب قواتك ثم حاول من جديد."}</Text><View style={styles.outcomeActions}>{outcome === "victory" && level.number < LEVELS.length ? <Pressable onPress={nextLevel} style={({ pressed }) => [styles.outcomePrimary, pressed && styles.pressed]}><Text style={styles.outcomePrimaryText}>المستوى التالي</Text></Pressable> : null}<Pressable onPress={retryLevel} style={({ pressed }) => [styles.outcomeSecondary, pressed && styles.pressed]}><Text style={styles.outcomeSecondaryText}>{outcome === "victory" ? "إعادة المستوى" : "حاول مجدداً"}</Text></Pressable></View></View> : null}
+      {outcome !== "playing" ? <View style={[styles.outcomePanel, outcome === "victory" ? styles.outcomeVictory : styles.outcomeDefeat]}><Text style={styles.outcomeSymbol}>{outcome === "victory" ? "✦" : "!"}</Text><Text style={styles.outcomeTitle}>{outcome === "victory" ? "اكتمل المستوى" : "انتهت المهمة"}</Text><Text style={styles.outcomeCopy}>{outcome === "victory" ? `نتيجة هذه المهمة: ${earnedStars} من 3 نجوم${level.number < LEVELS.length ? ` · أفضل نتيجة ${bestStars} نجوم` : " · أتممت الحملة"}.` : "استعد ترتيب قواتك ثم حاول من جديد."}</Text><View style={styles.outcomeActions}>{outcome === "victory" && level.number < LEVELS.length ? <Pressable onPress={nextLevel} style={({ pressed }) => [styles.outcomePrimary, pressed && styles.pressed]}><Text style={styles.outcomePrimaryText}>المستوى التالي</Text></Pressable> : null}<Pressable onPress={retryLevel} style={({ pressed }) => [styles.outcomeSecondary, pressed && styles.pressed]}><Text style={styles.outcomeSecondaryText}>{outcome === "victory" ? "إعادة المستوى" : "حاول مجدداً"}</Text></Pressable></View></View> : null}
       {selected ? <View style={styles.detailCard}><View style={styles.detailText}><Text style={styles.detailTitle}>{selected.name}</Text><Text style={styles.detailCopy}>{COLORS[selected.owner].label} · {Math.floor(selected.troops)} / {selected.maxTroops} قوات</Text>{selectedSource ? <Text style={styles.detailAction}>اختر هدفاً متصلاً أدناه لإرسال 50% من القوات.</Text> : null}</View><View style={styles.detailSide}><Text style={styles.detailValue}>+{selected.productionRate.toFixed(1)} / ث</Text>{selectedSource && validTargetIds.length > 0 ? <View style={styles.quickTargets}>{validTargetIds.map((targetId) => { const target = state.territories.find((territory) => territory.id === targetId); return target ? <Pressable key={target.id} onPress={() => sendTroops(selectedSource.id, target.id)} style={({ pressed }) => [styles.quickTarget, pressed && styles.pressed]}><Text style={styles.quickTargetText}>إرسال إلى {target.name}</Text></Pressable> : null; })}</View> : null}</View></View> : null}
       <Pressable onPress={reset} style={({ pressed }) => [styles.reset, pressed && { opacity: 0.7 }]}><Text style={styles.resetText}>إعادة حملة الخريطة</Text></Pressable>
     </View>
